@@ -1,124 +1,114 @@
-import json
-import os
+import json, os, requests
 from datetime import datetime
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 
-# Config
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATA_FILE = "wallets.json"
 MINED_FILE = "mined.json"
 
-# Init storage
+# Storage Setup
 for file in [DATA_FILE, MINED_FILE]:
     if not os.path.exists(file):
         with open(file, "w") as f:
             json.dump({}, f)
 
-# Load/save helpers
-def load_wallets():
-    with open(DATA_FILE, "r") as f:
-        return json.load(f)
+def load_json(path): return json.load(open(path))
+def save_json(path, data): json.dump(data, open(path, "w"), indent=2)
 
-def save_wallets(w):
-    with open(DATA_FILE, "w") as f:
-        json.dump(w, f, indent=2)
-
-def load_mined():
-    with open(MINED_FILE, "r") as f:
-        return json.load(f)
-
-def save_mined(m):
-    with open(MINED_FILE, "w") as f:
-        json.dump(m, f, indent=2)
-
-# Validate Solana wallet
 def is_valid_wallet(addr):
     return len(addr) in range(32, 45) and addr.isalnum()
 
-# Handlers
+# Commands
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    wallets = load_wallets()
-
+    wallets = load_json(DATA_FILE)
     if user_id in wallets:
-        await update.message.reply_text(f"✅ Already setup. Wallet: {wallets[user_id]['wallet']}\nUse /farm.")
+        await update.message.reply_text(f"✅ Already registered: {wallets[user_id]['wallet']}")
     else:
-        await update.message.reply_text("👋 Welcome! Send me your Solana wallet address to continue.")
+        await update.message.reply_text("👋 Welcome! Send your Solana wallet address to get started.")
         context.user_data['awaiting_wallet'] = True
 
 async def handle_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
     text = update.message.text.strip()
-
     if context.user_data.get("awaiting_wallet"):
         if is_valid_wallet(text):
-            wallets = load_wallets()
-            wallets[user_id] = {
-                "wallet": text,
-                "joined": datetime.utcnow().isoformat()
-            }
-            save_wallets(wallets)
-            context.user_data['awaiting_wallet'] = False
-            await update.message.reply_text("✅ Wallet saved! Use /farm.")
+            wallets = load_json(DATA_FILE)
+            wallets[user_id] = {"wallet": text, "joined": datetime.utcnow().isoformat()}
+            save_json(DATA_FILE, wallets)
+            await update.message.reply_text("✅ Wallet saved! Use /farm")
         else:
-            await update.message.reply_text("❌ Invalid Solana address. Try again.")
+            await update.message.reply_text("❌ Invalid Solana wallet.")
+        context.user_data['awaiting_wallet'] = False
 
 async def setwallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['awaiting_wallet'] = True
-    await update.message.reply_text("Send your new Solana wallet.")
+    await update.message.reply_text("Send your new Solana wallet:")
 
-async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    wallets = load_wallets()
-    mined = load_mined()
-
-    if user_id not in wallets:
-        await update.message.reply_text("❌ Set wallet first using /start.")
-        return
-
-    w = wallets[user_id]['wallet']
-    stats = mined.get(user_id, {"claims": 0, "tokens": [], "last_claim": "-", "usd_total": 0})
-    token_list = "\n".join([f"- {t}" for t in stats["tokens"]]) or "- None"
-
-    msg = f"""📊 Dashboard
-👛 Wallet: {w}
-🪙 Claims: {stats['claims']}
-🧾 Last: {stats['last_claim']}
-💰 Total: ${stats['usd_total']}
-🔹 Tokens:
-{token_list}
-"""
-    await update.message.reply_text(msg)
+# 🔥 Real Airdrop Fetch
+def get_sol_mints(wallet):
+    url = f"https://api.solana.fm/v0/accounts/{wallet}/tokens?limit=20&offset=0"
+    headers = {'accept': 'application/json'}
+    r = requests.get(url, headers=headers)
+    if r.status_code != 200: return []
+    data = r.json()
+    results = []
+    for t in data.get("tokens", []):
+        if t.get("isAirdrop", False) or t.get("token", {}).get("mintAuthority"):
+            symbol = t["token"].get("symbol", "???")
+            results.append(f"{symbol} - {t['amountReadable']} {symbol}")
+    return results[:5]
 
 async def farm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = str(update.effective_user.id)
-    wallets = load_wallets()
-    mined = load_mined()
+    wallets = load_json(DATA_FILE)
+    mined = load_json(MINED_FILE)
 
     if user_id not in wallets:
-        await update.message.reply_text("❌ Set wallet first with /start.")
+        await update.message.reply_text("❌ Set wallet with /start")
         return
 
-    now = datetime.utcnow().isoformat()
-    demo_tokens = ["0.0005 SOL (~$0.9)", "0.3 HULK (~$1.8)"]
+    wallet = wallets[user_id]['wallet']
+    mints = get_sol_mints(wallet)
 
-    stats = mined.get(user_id, {"claims": 0, "tokens": [], "last_claim": "-", "usd_total": 0})
-    stats["claims"] += len(demo_tokens)
-    stats["tokens"].extend(demo_tokens)
-    stats["last_claim"] = now
-    stats["usd_total"] += 2.7
-    mined[user_id] = stats
-    save_mined(mined)
+    if not mints:
+        await update.message.reply_text("😐 No airdrops or new tokens found.")
+        return
 
-    await update.message.reply_text(f"✅ You farmed {len(demo_tokens)} tokens!\nUse /report to view them.")
+    mined[user_id] = {
+        "wallet": wallet,
+        "claims": len(mints),
+        "tokens": mints,
+        "last_claim": datetime.utcnow().isoformat(),
+        "usd_total": round(len(mints) * 0.9, 2)
+    }
+    save_json(MINED_FILE, mined)
+    await update.message.reply_text(f"✅ Detected {len(mints)} tokens!\nUse /report")
 
-# Telegram bot setup
+async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    mined = load_json(MINED_FILE)
+    if user_id not in mined:
+        await update.message.reply_text("❌ Nothing claimed yet.")
+        return
+    d = mined[user_id]
+    token_list = "\n".join(f"- {t}" for t in d['tokens'])
+    await update.message.reply_text(f"""📊 Dashboard:
+👛 {d['wallet']}
+🪙 Claims: {d['claims']}
+🧾 Last: {d['last_claim']}
+💰 Est. Total: ${d['usd_total']}
+🔹 Tokens:
+{token_list}
+""")
+
+# Bot Init
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("setwallet", setwallet))
-app.add_handler(CommandHandler("report", report))
 app.add_handler(CommandHandler("farm", farm))
+app.add_handler(CommandHandler("report", report))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
 
 if __name__ == '__main__':
