@@ -122,5 +122,5 @@ app.add_handler(CommandHandler("farm", farm))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_wallet))
 
 if __name__ == '__main__':
-    print(\"Bot running...\")
+    print("Bot running...")
     app.run_polling()
